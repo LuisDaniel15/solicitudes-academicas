@@ -1,3 +1,9 @@
+source venv/bin/activate
+uvicorn app.main:app --reload
+
 (venv) @LuisDaniel15 ➜ /workspaces/solicitudes-academicas (main) $ uvicorn app.main:app --reload
 
+
+source venv/bin/activate
+python -m app.main
 @LuisDaniel15 ➜ /workspaces/solicitudes-academicas (main) $ python -m app.main

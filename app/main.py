@@ -1,332 +1,269 @@
-from fastapi import FastAPI, Depends, HTTPException, Request
-from fastapi.responses import PlainTextResponse
-from twilio.twiml.messaging_response import MessagingResponse
+from fastapi import FastAPI
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app import crud, schemas, models
-from jose import jwt
-from datetime import datetime, timedelta
+from app import crud, models
 from dotenv import load_dotenv
 import os
 
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
+from telegram.ext import (
+    ApplicationBuilder,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
+    ContextTypes
+)
+
 load_dotenv()
 
-SECRET_KEY = os.getenv("SECRET_KEY")
-ALGORITHM = "HS256"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 app = FastAPI(title="Sistema de Solicitudes Académicas")
 
 
-# ── Función para crear token JWT ──────────────────────────────
-def crear_token(data: dict):
-    datos = data.copy()
-    expiracion = datetime.utcnow() + timedelta(hours=8)
-    datos.update({"exp": expiracion})
-    return jwt.encode(datos, SECRET_KEY, algorithm=ALGORITHM)
+# ─────────────────────────────
+# 🧠 RAG SIMPLE
+# ─────────────────────────────
+def responder_rag(mensaje: str):
+    mensaje = mensaje.lower()
+
+    if "homolog" in mensaje:
+        return "📄 Homologación:\n• Certificado de notas\n• Contenido programático"
+    if "cancel" in mensaje:
+        return "📄 Cancelación:\n• Carta con motivo"
+    if "certificado" in mensaje:
+        return "📄 Certificados:\nNo requieren documentos"
+    if "grado" in mensaje:
+        return "🎓 Grado:\nDebes estar a paz y salvo"
+
+    return None
 
 
-# ── Función para obtener usuario del token ────────────────────
-def get_usuario_actual(token: str, db: Session):
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        usuario_id = payload.get("sub")
-        return crud.get_usuario_por_id(db, usuario_id)
-    except:
-        raise HTTPException(status_code=401, detail="Token inválido")
+# ─────────────────────────────
+# 🎛️ MENÚ
+# ─────────────────────────────
+def menu_principal(usuario):
+    keyboard = [
+        [InlineKeyboardButton("📄 Crear solicitud", callback_data="crear")],
+        [InlineKeyboardButton("🔍 Consultar estado", callback_data="consultar")],
+        [InlineKeyboardButton("📋 Ver solicitudes", callback_data="ver")],
+        [InlineKeyboardButton("ℹ️ Ayuda", callback_data="ayuda")],
+    ]
 
-
-# ══════════════════════════════════════════════════════════════
-# ENDPOINTS DE INICIO
-# ══════════════════════════════════════════════════════════════
-
-@app.get("/")
-def inicio():
-    return {"mensaje": "API de Solicitudes Académicas funcionando ✅"}
-
-
-# ══════════════════════════════════════════════════════════════
-# ENDPOINTS DE AUTENTICACIÓN
-# ══════════════════════════════════════════════════════════════
-
-@app.post("/registro", response_model=schemas.UsuarioOut)
-def registrar_usuario(usuario: schemas.UsuarioCreate, db: Session = Depends(get_db)):
-    existe = crud.get_usuario_por_email(db, usuario.email)
-    if existe:
-        raise HTTPException(status_code=400, detail="El email ya está registrado")
-    return crud.crear_usuario(db, usuario)
-
-
-@app.post("/login", response_model=schemas.TokenOut)
-def login(datos: schemas.LoginRequest, db: Session = Depends(get_db)):
-    usuario = crud.get_usuario_por_email(db, datos.email)
-    if not usuario:
-        raise HTTPException(status_code=400, detail="Email o contraseña incorrectos")
-    if not crud.verificar_password(datos.password, usuario.hashed_password):
-        raise HTTPException(status_code=400, detail="Email o contraseña incorrectos")
-    token = crear_token({"sub": str(usuario.id)})
-    return {"access_token": token, "token_type": "bearer"}
-
-
-# ══════════════════════════════════════════════════════════════
-# ENDPOINTS DE SOLICITUDES
-# ══════════════════════════════════════════════════════════════
-
-@app.post("/solicitudes", response_model=schemas.SolicitudOut)
-def crear_solicitud(solicitud: schemas.SolicitudCreate, token: str, db: Session = Depends(get_db)):
-    usuario = get_usuario_actual(token, db)
-    return crud.crear_solicitud(db, solicitud, usuario.id)
-
-
-@app.get("/solicitudes", response_model=list[schemas.SolicitudOut])
-def ver_todas_solicitudes(token: str, db: Session = Depends(get_db)):
-    usuario = get_usuario_actual(token, db)
-    return crud.get_todas_solicitudes(db)
-
-
-@app.get("/solicitudes/mis-solicitudes", response_model=list[schemas.SolicitudOut])
-def mis_solicitudes(token: str, db: Session = Depends(get_db)):
-    usuario = get_usuario_actual(token, db)
-    return crud.get_solicitudes_por_usuario(db, usuario.id)
-
-
-@app.get("/solicitudes/buscar", response_model=list[schemas.SolicitudOut])
-def buscar_solicitudes(
-    token: str,
-    estado_id: int = None,
-    tipo_solicitud_id: int = None,
-    canal_origen: str = None,
-    db: Session = Depends(get_db)
-):
-    usuario = get_usuario_actual(token, db)
-    return crud.buscar_solicitudes(db, estado_id, tipo_solicitud_id, canal_origen)
-
-
-@app.get("/solicitudes/{solicitud_id}", response_model=schemas.SolicitudOut)
-def ver_solicitud(solicitud_id: str, token: str, db: Session = Depends(get_db)):
-    usuario = get_usuario_actual(token, db)
-    solicitud = crud.get_solicitud_por_id(db, solicitud_id)
-    if not solicitud:
-        raise HTTPException(status_code=404, detail="Solicitud no encontrada")
-    return solicitud
-
-
-@app.patch("/solicitudes/{solicitud_id}/estado", response_model=schemas.SolicitudOut)
-def actualizar_estado(
-    solicitud_id: str,
-    datos: schemas.SolicitudUpdateEstado,
-    token: str,
-    db: Session = Depends(get_db)
-):
-    usuario = get_usuario_actual(token, db)
-    solicitud = crud.actualizar_estado_solicitud(
-        db, solicitud_id, datos.estado_id, usuario.id, datos.comentario
+    return (
+        f"👋 Hola {usuario.nombres}\n\n"
+        "¿Qué deseas hacer?",
+        InlineKeyboardMarkup(keyboard)
     )
-    if not solicitud:
-        raise HTTPException(status_code=404, detail="Solicitud no encontrada")
-    return solicitud
 
 
-@app.get("/solicitudes/{solicitud_id}/historial", response_model=list[schemas.HistorialOut])
-def ver_historial(solicitud_id: str, token: str, db: Session = Depends(get_db)):
-    usuario = get_usuario_actual(token, db)
-    return crud.get_historial_solicitud(db, solicitud_id)
+def boton_volver():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 Volver", callback_data="menu")]
+    ])
 
 
-# ══════════════════════════════════════════════════════════════
-# ENDPOINTS DE CATÁLOGOS
-# ══════════════════════════════════════════════════════════════
-
-@app.get("/tipos-solicitud", response_model=list[schemas.TipoSolicitudOut])
-def ver_tipos_solicitud(db: Session = Depends(get_db)):
-    return db.query(models.TipoSolicitud).all()
-
-
-@app.get("/estados", response_model=list[schemas.EstadoOut])
-def ver_estados(db: Session = Depends(get_db)):
-    return db.query(models.Estado).all()
-
-# ══════════════════════════════════════════════════════════════
-# FUNCIÓN DEL ASISTENTE VIRTUAL CON MEMORIA DE SESIÓN
-# ══════════════════════════════════════════════════════════════
-
-def procesar_mensaje(mensaje: str, telefono: str, db: Session, sesion) -> str:
-    """
-    Recibe el mensaje y el estado actual de la sesión
-    para saber en qué paso está el usuario.
-    """
-
-    # Validar mensaje vacío
-    if not mensaje or not mensaje.strip():
-        return "⚠️ No recibí ningún mensaje. Por favor escribe tu consulta."
+# ─────────────────────────────
+# 🤖 LÓGICA
+# ─────────────────────────────
+def procesar_mensaje(mensaje: str, telefono: str, db: Session, sesion):
 
     mensaje = mensaje.strip().lower()
-    estado_actual = sesion.estado_sesion  # recordamos en qué paso está
 
-    # ── PASO: INICIO — el usuario saluda ─────────────────────
-    if estado_actual == "INICIO" or any(p in mensaje for p in ["hola", "buenos dias", "buenas tardes", "menu", "inicio"]):
-        crud.actualizar_estado_sesion(db, str(sesion.id), "MENU_PRINCIPAL")
-        return (
-            "👋 ¡Hola! Bienvenido al sistema de solicitudes académicas.\n\n"
-            "¿Qué deseas hacer?\n"
-            "1️⃣  Crear una solicitud\n"
-            "2️⃣  Consultar estado de mi solicitud\n"
-            "3️⃣  Ver mis solicitudes\n"
-            "4️⃣  Ayuda\n\n"
-            "Responde con el número de la opción."
-        )
+    if mensaje in ["hola", "menu"]:
+        crud.actualizar_estado_sesion(db, sesion.id, "INICIO")
+        sesion.estado_sesion = "INICIO"
 
-    # ── PASO: MENU PRINCIPAL ──────────────────────────────────
-    elif estado_actual == "MENU_PRINCIPAL":
+    respuesta_rag = responder_rag(mensaje)
+    if respuesta_rag:
+        return respuesta_rag + "\n\nEscribe 'hola' para volver"
 
-        if mensaje == "1":
-            crud.actualizar_estado_sesion(db, str(sesion.id), "SELECCIONAR_TIPO")
-            return (
-                "📋 ¿Qué tipo de solicitud necesitas?\n\n"
-                "1️⃣  Certificado de Matrícula\n"
-                "2️⃣  Constancia de Estudio\n"
-                "3️⃣  Certificado de Notas\n"
-                "4️⃣  Paz y Salvo Académico\n"
-                "5️⃣  Cambio de Grupo\n"
-                "6️⃣  Homologación de Materias\n"
-                "7️⃣  Cancelación de Asignatura\n"
-                "8️⃣  Solicitud de Grado\n"
-                "9️⃣  Solicitud de Beca\n\n"
-                "Responde con el número."
-            )
+    estado = sesion.estado_sesion
 
-        elif mensaje == "2":
-            crud.actualizar_estado_sesion(db, str(sesion.id), "CONSULTAR_ESTADO")
-            return (
-                "🔍 Escribe el código de tu solicitud.\n"
-                "Ejemplo: *SOL-2026-00001*"
-            )
-
-        elif mensaje == "3":
-            usuario = crud.get_usuario_por_telefono(db, telefono)
-            if not usuario:
-                return "⚠️ Tu número no está registrado. Regístrate primero en la plataforma."
-            solicitudes = crud.get_solicitudes_por_usuario(db, usuario.id)
-            if not solicitudes:
-                return "📭 No tienes solicitudes registradas aún."
-            respuesta = "📋 *Tus solicitudes:*\n\n"
-            for s in solicitudes:
-                respuesta += f"• {s.codigo_referencia} — {s.tipo_solicitud.nombre} — *{s.estado.nombre}*\n"
-            crud.actualizar_estado_sesion(db, str(sesion.id), "MENU_PRINCIPAL")
-            return respuesta
-
-        elif mensaje == "4":
-            return (
-                "ℹ️ *Ayuda:*\n\n"
-                "• Escribe *hola* para ver el menú\n"
-                "• Escribe *1* para crear una solicitud\n"
-                "• Escribe *2* para consultar estado\n"
-                "• Escribe *3* para ver tus solicitudes\n"
-                "• Escribe *adios* para finalizar"
-            )
-
-        else:
-            return "Por favor responde con un número del 1 al 4. Escribe *hola* para ver el menú."
-
-    # ── PASO: SELECCIONAR TIPO DE SOLICITUD ───────────────────
-    elif estado_actual == "SELECCIONAR_TIPO":
-        tipos = {
-            "1": "Certificado de Matrícula",
-            "2": "Constancia de Estudio",
-            "3": "Certificado de Notas",
-            "4": "Paz y Salvo Académico",
-            "5": "Cambio de Grupo / Horario",
-            "6": "Homologación de Materias",
-            "7": "Cancelación de Asignatura",
-            "8": "Solicitud de Grado",
-            "9": "Solicitud de Beca",
-        }
-        if mensaje in tipos:
-            tipo_nombre = tipos[mensaje]
-            crud.actualizar_estado_sesion(db, str(sesion.id), f"ESPERANDO_DESCRIPCION_{mensaje}")
-            return (
-                f"✅ Entendido: *{tipo_nombre}*\n\n"
-                "Por favor descríbeme brevemente el motivo de tu solicitud."
-            )
-        else:
-            return "Por favor responde con un número del 1 al 9."
-
-    # ── PASO: ESPERANDO DESCRIPCIÓN ───────────────────────────
-    elif estado_actual.startswith("ESPERANDO_DESCRIPCION_"):
-        tipo_id = int(estado_actual.split("_")[-1])
+    # INICIO
+    if estado == "INICIO":
         usuario = crud.get_usuario_por_telefono(db, telefono)
 
         if not usuario:
-            crud.actualizar_estado_sesion(db, str(sesion.id), "MENU_PRINCIPAL")
-            return "⚠️ Tu número no está registrado. Regístrate primero en la plataforma."
+            crud.actualizar_estado_sesion(db, sesion.id, "PEDIR_DOCUMENTO")
+            return "👋 Hola\n\nEscribe tu número de documento:"
 
-        # Crear la solicitud en la BD
+        crud.actualizar_estado_sesion(db, sesion.id, "MENU")
+        return menu_principal(usuario)
+
+    # LOGIN
+    elif estado == "PEDIR_DOCUMENTO":
+        usuario = db.query(models.Usuario).filter(
+            models.Usuario.numero_documento == mensaje
+        ).first()
+
+        if not usuario:
+            return "❌ Documento no encontrado"
+
+        usuario.telefono_whatsapp = telefono
+        db.commit()
+
+        crud.actualizar_estado_sesion(db, sesion.id, "MENU")
+
+        return (
+            f"✅ Bienvenido {usuario.nombres}",
+            menu_principal(usuario)[1]
+        )
+
+    usuario = crud.get_usuario_por_telefono(db, telefono)
+
+    if not usuario:
+        crud.actualizar_estado_sesion(db, sesion.id, "PEDIR_DOCUMENTO")
+        return "🔒 Debes identificarte"
+
+    # CONSULTAR
+    if estado == "CONSULTAR":
+        if mensaje.startswith("sol-"):
+            solicitud = crud.get_solicitud_por_codigo(db, mensaje.upper())
+
+            if not solicitud:
+                return "❌ No encontrada"
+
+            crud.actualizar_estado_sesion(db, sesion.id, "MENU")
+
+            return f"📄 {solicitud.codigo_referencia}\nEstado: {solicitud.estado.nombre}"
+
+        return "Escribe el código correcto"
+
+    return "🤔 No entendí. Escribe 'hola'"
+
+
+# ─────────────────────────────
+# 🔘 BOTONES
+# ─────────────────────────────
+async def manejar_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    db = next(get_db())
+    user_id = str(query.from_user.id)
+
+    sesion = crud.get_sesion_activa(db, user_id)
+    if not sesion:
+        sesion = crud.crear_sesion_whatsapp(db, user_id)
+
+    usuario = crud.get_usuario_por_telefono(db, user_id)
+
+    if not usuario:
+        await query.message.reply_text("🔒 Identifícate primero")
+        return
+
+    data = query.data
+
+    # MENU
+    if data == "menu":
+        texto, teclado = menu_principal(usuario)
+        await query.message.reply_text(texto, reply_markup=teclado)
+
+    # CREAR
+    elif data == "crear":
+        keyboard = [
+            [InlineKeyboardButton("📄 Matrícula", callback_data="tipo_1")],
+            [InlineKeyboardButton("📄 Constancia", callback_data="tipo_2")],
+            [InlineKeyboardButton("🔙 Volver", callback_data="menu")]
+        ]
+
+        await query.message.reply_text(
+            "Selecciona tipo:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    # CREAR DIRECTO
+    elif data.startswith("tipo_"):
+        tipo_id = int(data.split("_")[1])
+
         from app.schemas import SolicitudCreate
-        nueva = SolicitudCreate(tipo_solicitud_id=tipo_id, descripcion=mensaje)
+
+        nueva = SolicitudCreate(
+            tipo_solicitud_id=tipo_id,
+            descripcion="Telegram"
+        )
+
         solicitud = crud.crear_solicitud(db, nueva, str(usuario.id))
 
-        crud.actualizar_estado_sesion(db, str(sesion.id), "MENU_PRINCIPAL")
-        return (
-            f"✅ *Solicitud creada exitosamente*\n\n"
-            f"📄 Código: *{solicitud.codigo_referencia}*\n"
-            f"Estado: Pendiente\n"
-            f"Guarda este código para hacer seguimiento.\n\n"
-            f"Escribe *hola* para volver al menú."
+        await query.message.reply_text(
+            f"✅ Creada\nCódigo: {solicitud.codigo_referencia}"
         )
 
-    # ── PASO: CONSULTAR ESTADO ────────────────────────────────
-    elif estado_actual == "CONSULTAR_ESTADO":
-        if mensaje.startswith("sol-"):
-            codigo = mensaje.upper()
-            solicitud = crud.get_solicitud_por_codigo(db, codigo)
-            crud.actualizar_estado_sesion(db, str(sesion.id), "MENU_PRINCIPAL")
-            if not solicitud:
-                return f"❌ No encontré la solicitud *{codigo}*. Verifica el código."
-            return (
-                f"📄 *{solicitud.codigo_referencia}*\n\n"
-                f"Tipo: {solicitud.tipo_solicitud.nombre}\n"
-                f"Estado: *{solicitud.estado.nombre}*\n"
-                f"Fecha: {solicitud.creado_en.strftime('%d/%m/%Y')}\n\n"
-                f"Escribe *hola* para volver al menú."
-            )
+    # CONSULTAR
+    elif data == "consultar":
+        crud.actualizar_estado_sesion(db, sesion.id, "CONSULTAR")
+
+        await query.message.reply_text(
+            "Escribe código SOL-XXXX",
+            reply_markup=boton_volver()
+        )
+
+    # VER
+    elif data == "ver":
+        solicitudes = crud.get_solicitudes_por_usuario(db, usuario.id)
+
+        if not solicitudes:
+            await query.message.reply_text("No tienes solicitudes")
         else:
-            return "Por favor escribe el código en formato *SOL-2026-00001*"
+            texto = ""
+            for s in solicitudes:
+                texto += f"{s.codigo_referencia} - {s.estado.nombre}\n"
 
-    # ── DESPEDIDA ─────────────────────────────────────────────
-    elif any(p in mensaje for p in ["adios", "bye", "chao", "hasta luego"]):
-        crud.finalizar_sesion_whatsapp(db, str(sesion.id))
-        return "👋 ¡Hasta luego! Que tengas un excelente día. 😊"
+            await query.message.reply_text(texto)
 
-    else:
-        return (
-            "🤔 No entendí tu mensaje.\n"
-            "Escribe *hola* para ver el menú principal."
+    # AYUDA
+    elif data == "ayuda":
+        await query.message.reply_text(
+            "Puedes:\n1 Crear\n2 Consultar\n3 Ver",
+            reply_markup=boton_volver()
         )
 
 
-# ══════════════════════════════════════════════════════════════
-# ENDPOINT WEBHOOK
-# ══════════════════════════════════════════════════════════════
+# ─────────────────────────────
+# 💬 MENSAJES
+# ─────────────────────────────
+async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db = next(get_db())
 
-@app.post("/whatsapp", response_class=PlainTextResponse)
-async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
-    form = await request.form()
-    mensaje_entrante = form.get("Body", "").strip()
-    telefono         = form.get("From", "").replace("whatsapp:", "")
+    mensaje = update.message.text
+    user_id = str(update.message.from_user.id)
 
-    # Buscar sesión activa o crear una nueva
-    sesion = crud.get_sesion_activa(db, telefono)
+    sesion = crud.get_sesion_activa(db, user_id)
     if not sesion:
-        sesion = crud.crear_sesion_whatsapp(db, telefono)
+        sesion = crud.crear_sesion_whatsapp(db, user_id)
 
-    # Guardar mensaje entrante
-    crud.guardar_mensaje_whatsapp(db, str(sesion.id), "ENTRANTE", mensaje_entrante)
+    respuesta = procesar_mensaje(mensaje, user_id, db, sesion)
 
-    # Procesar y responder
-    respuesta_texto = procesar_mensaje(mensaje_entrante, telefono, db, sesion)
+    if isinstance(respuesta, tuple):
+        texto, teclado = respuesta
+        await update.message.reply_text(texto, reply_markup=teclado)
+    else:
+        await update.message.reply_text(respuesta)
 
-    # Guardar respuesta
-    crud.guardar_mensaje_whatsapp(db, str(sesion.id), "SALIENTE", respuesta_texto)
 
-    resp = MessagingResponse()
-    resp.message(respuesta_texto)
-    return PlainTextResponse(str(resp), media_type="application/xml")
+# ─────────────────────────────
+# 🚀 BOT
+# ─────────────────────────────
+def iniciar_bot():
+    print("🔥 Bot corriendo...")
+
+    app_telegram = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    app_telegram.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje)
+    )
+
+    app_telegram.add_handler(
+        CallbackQueryHandler(manejar_botones)
+    )
+
+    app_telegram.run_polling()
+
+
+if __name__ == "__main__":
+    iniciar_bot()

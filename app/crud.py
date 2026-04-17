@@ -107,10 +107,9 @@ def get_solicitud_por_id(db: Session, solicitud_id: str):
 
 
 def get_solicitud_por_codigo(db: Session, codigo: str):
-    """Busca una solicitud por su código de referencia — ej: SOL-2024-00001"""
-    return db.query(models.Solicitud).filter(
-        models.Solicitud.codigo_referencia == codigo
-    ).first()
+        """Busca una solicitud por su código de referencia — ej: SOL-2024-00001"""
+        return db.query(models.Solicitud).filter(
+                    models.Solicitud.codigo_referencia == codigo).first()
 
 
 def get_solicitudes_por_usuario(db: Session, usuario_id: str):

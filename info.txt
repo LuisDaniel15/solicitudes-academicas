@@ -1,0 +1,3 @@
+(venv) @LuisDaniel15 ➜ /workspaces/solicitudes-academicas (main) $ uvicorn app.main:app --reload
+
+@LuisDaniel15 ➜ /workspaces/solicitudes-academicas (main) $ python -m app.main
